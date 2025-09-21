@@ -37,7 +37,6 @@ while True:
     
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
-    time.sleep(1)  # Sleep for 1 second each loop
 
 camera.release()
 cv2.destroyAllWindows()
