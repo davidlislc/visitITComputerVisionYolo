@@ -14,6 +14,10 @@ model = YOLO('yolo11n.pt')  # Replace with a face-trained model if available
 # Add face detection using OpenCV as backup
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
+# Frame skipping for performance
+FRAME_SKIP = 3  # Process every 10th frame
+frame_count = 0
+
 # Load reference images with names
 def load_reference_faces(reference_folder='faces'):
     """
@@ -89,6 +93,9 @@ last_announcement = {}  # Track last announcement time per person
 speech_cooldown = 5  # seconds between announcements for same person
 speaking = False
 
+# Cache for recognition results to display on skipped frames
+last_recognition_results = []
+
 def speak_async(text):
     """Speak text asynchronously to avoid blocking video processing."""
     global speaking
@@ -152,86 +159,134 @@ def recognize_face(face_crop, reference_faces, threshold=0.6):
     else:
         return None, 0, float('inf')
 
+def draw_cached_results(frame):
+    """Draw the last recognition results on skipped frames."""
+    for result in last_recognition_results:
+        x1_face, y1_face, x2_face, y2_face, label, color = result
+        cv2.rectangle(frame, (x1_face, y1_face), (x2_face, y2_face), color, 2)
+        cv2.putText(
+            frame, 
+            f"{label} (Cached)", 
+            (x1_face, y1_face - 10),
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            0.6, 
+            color, 
+            2
+        )
+
 # Start webcam
 cap = cv2.VideoCapture(0)
+
+# FPS tracking
+fps_start_time = time.time()
+fps_frame_count = 0
+current_fps = 0
+
+print(f"🚀 Face Recognition with Frame Skipping (Every {FRAME_SKIP} frames)")
+print("This will significantly improve performance!")
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    # Detect faces using YOLOv11
-    results = model.predict(source=frame, conf=0.5, verbose=False)
-    
+    frame_count += 1
+    fps_frame_count += 1
     current_time = time.time()
+    
+    # Calculate FPS every 30 frames
+    if fps_frame_count % 30 == 0:
+        current_fps = 30 / (current_time - fps_start_time)
+        fps_start_time = current_time
 
-    for result in results:
-        if result.boxes is not None:
-            for box in result.boxes:
-                cls_name = result.names[int(box.cls)]
-                if cls_name == 'person':
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    person_crop = frame[y1:y2, x1:x2]
-                    
-                    # Use OpenCV to find face within the person detection
-                    gray = cv2.cvtColor(person_crop, cv2.COLOR_BGR2GRAY)
-                    faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-                    
-                    for (fx, fy, fw, fh) in faces:
-                        x1_face, y1_face = x1 + fx, y1 + fy
-                        x2_face, y2_face = x1 + fx + fw, y1 + fy + fh
-                        face_crop = frame[y1_face:y2_face, x1_face:x2_face]
+    # Process every FRAME_SKIP frames
+    if frame_count % FRAME_SKIP == 0:
+        print(f"Processing frame {frame_count}...")
+        
+        # Clear previous results
+        last_recognition_results = []
+        
+        # Detect faces using YOLOv11
+        results = model.predict(source=frame, conf=0.5, verbose=False)
 
-                        # Recognize face against all reference faces
-                        try:
-                            name, confidence, distance = recognize_face(face_crop, reference_faces)
-                            
-                            if name and confidence > 0.3:  # Minimum confidence threshold
-                                if "Unknown" not in name:
-                                    # Verified match
-                                    label = f'{name} ({confidence:.2f})'
-                                    color = (0, 255, 0)  # Green for known person
-                                    
-                                    # Announce name if enough time has passed
-                                    if (name not in last_announcement or 
-                                        current_time - last_announcement[name] > speech_cooldown):
-                                        speak_async(f"Hello {name}")
-                                        last_announcement[name] = current_time
-                                        print(f"Announced: {name} (confidence: {confidence:.2f})")
-                                else:
-                                    # Possible match but low confidence
-                                    label = name
-                                    color = (0, 165, 255)  # Orange for uncertain
-                            else:
-                                label = f'Unknown Person'
-                                color = (0, 0, 255)  # Red for unknown
-                                
-                        except Exception as e:
-                            label = 'ERROR'
-                            color = (0, 255, 255)  # Yellow for error
-                            print(f"Recognition error: {e}")
+        for result in results:
+            if result.boxes is not None:
+                for box in result.boxes:
+                    cls_name = result.names[int(box.cls)]
+                    if cls_name == 'person':
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        person_crop = frame[y1:y2, x1:x2]
                         
-                        # Draw bounding box and label
-                        cv2.rectangle(frame, (x1_face, y1_face), (x2_face, y2_face), color, 2)
-                        cv2.putText(
-                            frame, 
-                            label, 
-                            (x1_face, y1_face - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 
-                            0.6, 
-                            color, 
-                            2
-                        )
+                        # Use OpenCV to find face within the person detection
+                        gray = cv2.cvtColor(person_crop, cv2.COLOR_BGR2GRAY)
+                        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+                        
+                        for (fx, fy, fw, fh) in faces:
+                            x1_face, y1_face = x1 + fx, y1 + fy
+                            x2_face, y2_face = x1 + fx + fw, y1 + fy + fh
+                            face_crop = frame[y1_face:y2_face, x1_face:x2_face]
+
+                            # Recognize face against all reference faces
+                            try:
+                                name, confidence, distance = recognize_face(face_crop, reference_faces)
+                                
+                                if name and confidence > 0.3:  # Minimum confidence threshold
+                                    if "Unknown" not in name:
+                                        # Verified match
+                                        label = f'{name} ({confidence:.2f})'
+                                        color = (0, 255, 0)  # Green for known person
+                                        
+                                        # Announce name if enough time has passed
+                                        if (name not in last_announcement or 
+                                            current_time - last_announcement[name] > speech_cooldown):
+                                            speak_async(f"Hello {name}")
+                                            last_announcement[name] = current_time
+                                            print(f"Announced: {name} (confidence: {confidence:.2f})")
+                                    else:
+                                        # Possible match but low confidence
+                                        label = name
+                                        color = (0, 165, 255)  # Orange for uncertain
+                                else:
+                                    label = f'Unknown Person'
+                                    color = (0, 0, 255)  # Red for unknown
+                                    
+                            except Exception as e:
+                                label = 'ERROR'
+                                color = (0, 255, 255)  # Yellow for error
+                                print(f"Recognition error: {e}")
+                            
+                            # Store result for cached display
+                            last_recognition_results.append((x1_face, y1_face, x2_face, y2_face, label, color))
+                            
+                            # Draw bounding box and label
+                            cv2.rectangle(frame, (x1_face, y1_face), (x2_face, y2_face), color, 2)
+                            cv2.putText(
+                                frame, 
+                                label, 
+                                (x1_face, y1_face - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 
+                                0.6, 
+                                color, 
+                                2
+                            )
+    else:
+        # On skipped frames, show cached results
+        draw_cached_results(frame)
 
     # Add status indicators
     status_text = "Speaking..." if speaking else "Ready"
     cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     
+    # Show frame info
+    processing_status = "Processing" if frame_count % FRAME_SKIP == 0 else "Skipping"
+    cv2.putText(frame, f"FPS: {current_fps:.1f} | {processing_status}", (10, 60), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    
     # Show number of loaded faces
-    cv2.putText(frame, f"Known faces: {len(reference_faces)}", (10, 60), 
+    cv2.putText(frame, f"Known faces: {len(reference_faces)}", (10, 90), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-    cv2.imshow('Facial Recognition', frame)
+    cv2.imshow('Facial Recognition (Frame Skipping)', frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
