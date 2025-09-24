@@ -1,3 +1,6 @@
 numpy>=1.21.0,<2.0
 ultralytics>=8.0.0
 opencv-python>=4.5.0
+deepface>=0.0.75
+tensorflow>=2.0.0
+pyttsx3>=2.90
