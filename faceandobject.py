@@ -9,26 +9,26 @@ import torch
 from facenet_pytorch import MTCNN, InceptionResnetV1
 from PIL import Image
 
-class UltraFastFaceRecognition:
+class SimultaneousDetectionSystem:
     def __init__(self):
         # Check if CUDA is available
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {self.device}")
         
-        # Load models
-        #self.yolo_model = YOLO('yolo11n.pt')  # Face-specific YOLO
-        self.yolo_model = YOLO('yolov8n-face.pt')  # Face-specific YOLO
-
+        # Load both YOLO models
+        self.object_model = YOLO('yolo11n.pt')      # General object detection
+        self.face_model = YOLO('yolov8n-face.pt')   # Face detection
+        
         # Initialize MTCNN for face detection and alignment
         self.mtcnn = MTCNN(
             image_size=160, 
             margin=0, 
             min_face_size=20,
-            thresholds=[0.6, 0.7, 0.7],  # MTCNN thresholds
+            thresholds=[0.6, 0.7, 0.7],
             factor=0.709, 
             post_process=True,
             device=self.device,
-            keep_all=False  # Only keep best face
+            keep_all=False
         )
         
         # Initialize InceptionResnetV1 for face recognition
@@ -44,7 +44,11 @@ class UltraFastFaceRecognition:
         self.engine = pyttsx3.init()
         self.engine.setProperty('rate', 180)
         self.speaking = False
+        
+        # Announcement tracking
         self.last_announcement = {}
+        self.prev_objects = set()
+        self.last_object_announcement = 0
         
     def load_reference_faces(self):
         """Load reference faces and compute embeddings using FaceNet."""
@@ -62,20 +66,15 @@ class UltraFastFaceRecognition:
                 img_path = os.path.join(faces_folder, filename)
                 
                 try:
-                    # Load image
                     img = Image.open(img_path).convert('RGB')
-                    
-                    # Extract face using MTCNN
                     img_cropped = self.mtcnn(img)
                     
                     if img_cropped is not None:
-                        # Get embedding
                         img_cropped = img_cropped.unsqueeze(0).to(self.device)
                         
                         with torch.no_grad():
                             embedding = self.resnet(img_cropped)
                             
-                        # Store normalized embedding
                         embedding = embedding.cpu().numpy().flatten()
                         embedding = embedding / np.linalg.norm(embedding)
                         
@@ -96,24 +95,18 @@ class UltraFastFaceRecognition:
     def get_face_embedding(self, face_img):
         """Extract face embedding using FaceNet."""
         try:
-            # Convert BGR to RGB
             if len(face_img.shape) == 3:
                 face_img = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
             
-            # Convert to PIL Image
             pil_img = Image.fromarray(face_img)
-            
-            # Extract and align face
             face_tensor = self.mtcnn(pil_img)
             
             if face_tensor is not None:
-                # Get embedding
                 face_tensor = face_tensor.unsqueeze(0).to(self.device)
                 
                 with torch.no_grad():
                     embedding = self.resnet(face_tensor)
                 
-                # Normalize embedding
                 embedding = embedding.cpu().numpy().flatten()
                 embedding = embedding / np.linalg.norm(embedding)
                 
@@ -122,25 +115,22 @@ class UltraFastFaceRecognition:
                 return None
                 
         except Exception as e:
-            print(f"Error getting embedding: {e}")
             return None
     
     def recognize_face_fast(self, face_img):
         """Ultra-fast face recognition using FaceNet embeddings."""
         try:
-            # Get face embedding
             face_embedding = self.get_face_embedding(face_img)
             
             if face_embedding is None:
                 return "No Face", 0
             
             if not self.reference_embeddings:
-                return "No References", 0
+                return "Unknown", 0
             
             best_similarity = -1
             best_name = "Unknown"
             
-            # Compare with all reference embeddings
             for name, ref_embedding in self.reference_embeddings.items():
                 similarity = self.cosine_similarity(face_embedding, ref_embedding)
                 
@@ -148,14 +138,12 @@ class UltraFastFaceRecognition:
                     best_similarity = similarity
                     best_name = name
             
-            # Threshold for recognition (FaceNet typically uses 0.6-0.8)
             if best_similarity > 0.6:
                 return best_name, best_similarity
             else:
-                return f"Unknown ({best_name}?)", best_similarity
+                return "Unknown", best_similarity
                 
         except Exception as e:
-            print(f"Recognition error: {e}")
             return "Error", 0
     
     def speak_async(self, text):
@@ -170,27 +158,125 @@ class UltraFastFaceRecognition:
                     self.speaking = False
             threading.Thread(target=speak, daemon=True).start()
     
+    def detect_and_process(self, frame, current_time):
+        """Detect both objects and faces simultaneously."""
+        detected_objects = set()
+        face_results = []
+        
+        # SIMULTANEOUS DETECTION: Run both models on the same frame
+        object_results = self.object_model(frame, conf=0.5, verbose=False)
+        face_results_raw = self.face_model.predict(frame, conf=0.5, verbose=False)
+        
+        # Process object detections
+        for result in object_results:
+            if result.boxes is not None:
+                for box in result.boxes:
+                    class_id = int(box.cls[0])
+                    class_name = self.object_model.names[class_id]
+                    confidence = float(box.conf[0])
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    
+                    detected_objects.add(class_name)
+                    
+                    # Draw object detection (Blue boxes)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                    
+                    # Object label
+                    label = f"{class_name} {confidence:.2f}"
+                    label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                    cv2.rectangle(frame, (x1, y1 - label_size[1] - 10), 
+                                 (x1 + label_size[0] + 10, y1), (255, 0, 0), -1)
+                    cv2.putText(frame, label, (x1 + 5, y1 - 5), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Process face detections
+        for result in face_results_raw:
+            if result.boxes is not None:
+                for box in result.boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    confidence = float(box.conf[0])
+                    
+                    # Add padding around face
+                    padding = 30
+                    x1 = max(0, x1 - padding)
+                    y1 = max(0, y1 - padding)
+                    x2 = min(frame.shape[1], x2 + padding)
+                    y2 = min(frame.shape[0], y2 + padding)
+                    
+                    # Extract face
+                    face_crop = frame[y1:y2, x1:x2]
+                    
+                    if face_crop.size > 0:
+                        # Recognize face
+                        name, similarity = self.recognize_face_fast(face_crop)
+                        
+                        # Determine color and label
+                        if name != "Unknown" and name != "Error" and "No Face" not in name:
+                            color = (0, 255, 0)  # Green for recognized
+                            label = f"{name} ({similarity:.3f})"
+                            
+                            # Announce face
+                            if (name not in self.last_announcement or 
+                                current_time - self.last_announcement[name] > 4):
+                                self.speak_async(f"Hello {name}")
+                                self.last_announcement[name] = current_time
+                        else:
+                            color = (0, 0, 255)  # Red for unknown
+                            label = "Unknown"
+                        
+                        # Draw face detection (Green/Red boxes)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+                        
+                        # Face label with bigger text
+                        font_scale = 0.8
+                        thickness = 2
+                        label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
+                        cv2.rectangle(frame, (x1, y1 - label_size[1] - 15), 
+                                     (x1 + label_size[0] + 15, y1), color, -1)
+                        cv2.putText(frame, label, (x1 + 7, y1 - 7), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
+                        
+                        # Show detection confidence
+                        cv2.putText(frame, f"Det: {confidence:.2f}", (x1, y2 + 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        
+        # Announce objects
+        if (detected_objects != self.prev_objects and 
+            current_time - self.last_object_announcement > 3):
+            
+            if detected_objects:
+                objects_list = list(detected_objects)
+                if len(objects_list) == 1:
+                    announcement = f"I can see a {objects_list[0]}"
+                else:
+                    announcement = f"I can see {', '.join(objects_list[:-1])}, and a {objects_list[-1]}"
+                
+                self.speak_async(announcement)
+                print(f"Objects: {', '.join(objects_list)}")
+                
+            self.prev_objects = detected_objects.copy()
+            self.last_object_announcement = current_time
+        
+        return frame
+    
     def run(self):
-        """Main loop with FaceNet optimization."""
+        """Main loop running both detections simultaneously."""
         cap = cv2.VideoCapture(0)
         
-        # Set larger frame size for better quality
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)   # Increased from 640
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)   # Increased from 480
+        # Set larger frame size
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        
-        # Alternative resolutions you can try:
-        # HD: 1280x720
-        # Full HD: 1920x1080
-        # 4K: 3840x2160 (if your camera supports it)
         
         if not cap.isOpened():
             print("Error: Could not open camera")
             return
         
-        print("🚀 Ultra-Fast FaceNet Recognition Started")
+        print("🚀 Simultaneous Object Detection & Face Recognition Started")
         print(f"Frame size: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
-        print(f"References loaded: {len(self.reference_embeddings)}")
+        print(f"Reference faces: {len(self.reference_embeddings)}")
+        print("\nBoth YOLOv11n (objects) and YOLOv8n-face run on EVERY frame!")
+        print("Blue boxes = Objects | Green boxes = Recognized faces | Red boxes = Unknown faces")
         
         # Performance tracking
         fps_start_time = time.time()
@@ -213,67 +299,12 @@ class UltraFastFaceRecognition:
             
             # Process every nth frame
             if self.frame_count % self.FRAME_SKIP == 0:
-                # Detect faces with YOLO
-                results = self.yolo_model.predict(frame, conf=0.5, verbose=False)
-                
-                for result in results:
-                    if result.boxes is not None:
-                        for box in result.boxes:
-                            x1, y1, x2, y2 = map(int, box.xyxy[0])
-                            confidence = float(box.conf[0])
-                            
-                            # Add some padding around face
-                            padding = 30  # Increased padding for bigger frames
-                            x1 = max(0, x1 - padding)
-                            y1 = max(0, y1 - padding)
-                            x2 = min(frame.shape[1], x2 + padding)
-                            y2 = min(frame.shape[0], y2 + padding)
-                            
-                            # Extract face
-                            face_crop = frame[y1:y2, x1:x2]
-                            
-                            if face_crop.size > 0:
-                                # Fast recognition using FaceNet
-                                name, similarity = self.recognize_face_fast(face_crop)
-                                
-                                # Draw results with bigger text for larger frame
-                                if name != "Unknown" and "Error" not in name and "No" not in name:
-                                    if "?" not in name:  # High confidence match
-                                        color = (0, 255, 0)  # Green
-                                        label = f"{name} ({similarity:.3f})"
-                                        
-                                        # Announce
-                                        if (name not in self.last_announcement or 
-                                            current_time - self.last_announcement[name] > 4):
-                                            self.speak_async(f"Hello {name}")
-                                            self.last_announcement[name] = current_time
-                                    else:  # Low confidence match
-                                        color = (0, 165, 255)  # Orange
-                                        label = name
-                                else:
-                                    color = (0, 0, 255)  # Red
-                                    label = name
-                                
-                                # Draw bounding box with thicker lines for bigger frame
-                                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
-                                
-                                # Label background with bigger text
-                                font_scale = 0.8  # Increased from 0.6
-                                thickness = 2
-                                label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
-                                cv2.rectangle(frame, (x1, y1 - label_size[1] - 15), 
-                                            (x1 + label_size[0] + 15, y1), color, -1)
-                                
-                                cv2.putText(frame, label, (x1 + 7, y1 - 7), 
-                                          cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
-                                
-                                # Show YOLO confidence with bigger text
-                                cv2.putText(frame, f"Det: {confidence:.2f}", (x1, y2 + 30), 
-                                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                # SIMULTANEOUS DETECTION: Both models run on same frame
+                frame = self.detect_and_process(frame, current_time)
             
-            # Show performance info with bigger text for larger frame
+            # Show performance info
             status = "Speaking..." if self.speaking else "Ready"
-            processing = "Processing" if self.frame_count % self.FRAME_SKIP == 0 else "Skipping"
+            processing = "Processing Both" if self.frame_count % self.FRAME_SKIP == 0 else "Skipping"
             
             cv2.putText(frame, f"FPS: {current_fps:.1f} | {status}", (15, 40), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
@@ -281,14 +312,12 @@ class UltraFastFaceRecognition:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(frame, f"Device: {self.device}", (15, 120), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            
-            # Display frame size info
-            cv2.putText(frame, f"Resolution: {frame.shape[1]}x{frame.shape[0]}", (15, 160), 
+            cv2.putText(frame, f"YOLOv11n + YOLOv8n-face Simultaneous", (15, 160), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             
-            # Create resizable window for better viewing
-            cv2.namedWindow('FaceNet Recognition', cv2.WINDOW_NORMAL)
-            cv2.imshow('FaceNet Recognition', frame)
+            # Create resizable window
+            cv2.namedWindow('Simultaneous Detection', cv2.WINDOW_NORMAL)
+            cv2.imshow('Simultaneous Detection', frame)
             
             # Handle key presses
             key = cv2.waitKey(1) & 0xFF
@@ -298,21 +327,19 @@ class UltraFastFaceRecognition:
                 print("Reloading reference faces...")
                 self.load_reference_faces()
             elif key == ord('f'):
-                # Toggle fullscreen
-                cv2.setWindowProperty('FaceNet Recognition', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                cv2.setWindowProperty('Simultaneous Detection', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
             elif key == ord('w'):
-                # Return to windowed mode
-                cv2.setWindowProperty('FaceNet Recognition', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+                cv2.setWindowProperty('Simultaneous Detection', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
         
         cap.release()
         cv2.destroyAllWindows()
-        print("✅ FaceNet Recognition stopped")
+        print("✅ Simultaneous Detection System stopped")
 
 # Usage
 if __name__ == "__main__":
     try:
-        recognizer = UltraFastFaceRecognition()
-        recognizer.run()
+        system = SimultaneousDetectionSystem()
+        system.run()
     except Exception as e:
         print(f"Error: {e}")
-        print("Make sure you have installed: pip install facenet-pytorch")
+        print("Make sure you have installed: pip install facenet-pytorch ultralytics pyttsx3")
