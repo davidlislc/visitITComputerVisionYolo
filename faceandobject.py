@@ -8,8 +8,10 @@ import os
 import torch
 from facenet_pytorch import MTCNN, InceptionResnetV1
 from PIL import Image
+import json
+from datetime import datetime
 
-class SimultaneousDetectionSystem:
+class IntrusionDetectionSystem:
     def __init__(self):
         # Check if CUDA is available
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -50,6 +52,70 @@ class SimultaneousDetectionSystem:
         self.prev_objects = set()
         self.last_object_announcement = 0
         
+        # INTRUSION DETECTION SETTINGS
+        self.intrusion_zones = []  # List of intrusion zones
+        self.authorized_faces = set()  # Set of authorized face names
+        self.intrusion_active = True
+        self.intrusion_log = []
+        self.last_intrusion_alert = 0
+        self.intrusion_cooldown = 10  # seconds between intrusion alerts
+        
+        # Load configuration
+        self.load_intrusion_config()
+        
+        # Create logs directory
+        os.makedirs('logs', exist_ok=True)
+        
+    def load_intrusion_config(self):
+        """Load intrusion detection configuration."""
+        config_file = 'intrusion_config.json'
+        
+        # Default configuration
+        default_config = {
+            "intrusion_zones": [
+                {
+                    "name": "Main Door",
+                    "x1": 0.3, "y1": 0.3,
+                    "x2": 0.7, "y2": 0.7
+                }
+            ],
+            "authorized_faces": ["admin", "user1", "employee"],
+            "alert_threshold": 0.5,  # Minimum confidence for person detection
+            "save_intrusion_images": True
+        }
+        
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                    
+                # Load intrusion zones (convert relative to absolute coordinates)
+                self.intrusion_zones = config.get("intrusion_zones", default_config["intrusion_zones"])
+                self.authorized_faces = set(config.get("authorized_faces", default_config["authorized_faces"]))
+                self.save_intrusion_images = config.get("save_intrusion_images", True)
+                
+                print(f"✓ Loaded intrusion config: {len(self.intrusion_zones)} zones, {len(self.authorized_faces)} authorized faces")
+                
+            except Exception as e:
+                print(f"Error loading config: {e}")
+                self.create_default_config(config_file, default_config)
+        else:
+            self.create_default_config(config_file, default_config)
+            
+    def create_default_config(self, config_file, default_config):
+        """Create default intrusion configuration file."""
+        try:
+            with open(config_file, 'w') as f:
+                json.dump(default_config, f, indent=4)
+            print(f"✓ Created default intrusion config: {config_file}")
+            
+            self.intrusion_zones = default_config["intrusion_zones"]
+            self.authorized_faces = set(default_config["authorized_faces"])
+            self.save_intrusion_images = default_config["save_intrusion_images"]
+            
+        except Exception as e:
+            print(f"Error creating config: {e}")
+
     def load_reference_faces(self):
         """Load reference faces and compute embeddings using FaceNet."""
         faces_folder = 'faces'
@@ -158,16 +224,107 @@ class SimultaneousDetectionSystem:
                     self.speaking = False
             threading.Thread(target=speak, daemon=True).start()
     
+    def point_in_zone(self, point, zone, frame_width, frame_height):
+        """Check if point is inside intrusion zone."""
+        x, y = point
+        # Convert relative coordinates to absolute
+        zone_x1 = int(zone['x1'] * frame_width)
+        zone_y1 = int(zone['y1'] * frame_height)
+        zone_x2 = int(zone['x2'] * frame_width)
+        zone_y2 = int(zone['y2'] * frame_height)
+        
+        return zone_x1 <= x <= zone_x2 and zone_y1 <= y <= zone_y2
+    
+    def check_intrusion(self, person_bbox, face_name, frame_width, frame_height):
+        """Check if person is intruding in restricted zones."""
+        if not self.intrusion_active:
+            return False, None
+            
+        # Get center point of person
+        x1, y1, x2, y2 = person_bbox
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
+        
+        # Check each intrusion zone
+        for zone in self.intrusion_zones:
+            if self.point_in_zone((center_x, center_y), zone, frame_width, frame_height):
+                # Person is in restricted zone
+                if face_name not in self.authorized_faces:
+                    return True, zone['name']
+        
+        return False, None
+    
+    def log_intrusion(self, zone_name, face_name, confidence, frame=None):
+        """Log intrusion event."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        intrusion_event = {
+            "timestamp": timestamp,
+            "zone": zone_name,
+            "face_name": face_name,
+            "confidence": confidence,
+            "authorized": face_name in self.authorized_faces
+        }
+        
+        self.intrusion_log.append(intrusion_event)
+        
+        # Save to file
+        log_file = f"logs/intrusions_{datetime.now().strftime('%Y%m%d')}.json"
+        try:
+            if os.path.exists(log_file):
+                with open(log_file, 'r') as f:
+                    logs = json.load(f)
+            else:
+                logs = []
+                
+            logs.append(intrusion_event)
+            
+            with open(log_file, 'w') as f:
+                json.dump(logs, f, indent=2)
+                
+        except Exception as e:
+            print(f"Error saving log: {e}")
+        
+        # Save intrusion image
+        if self.save_intrusion_images and frame is not None:
+            img_filename = f"logs/intrusion_{timestamp.replace(':', '-').replace(' ', '_')}.jpg"
+            cv2.imwrite(img_filename, frame)
+        
+        print(f"🚨 INTRUSION LOGGED: {zone_name} - {face_name} at {timestamp}")
+    
+    def draw_intrusion_zones(self, frame):
+        """Draw intrusion zones on frame."""
+        frame_height, frame_width = frame.shape[:2]
+        
+        for i, zone in enumerate(self.intrusion_zones):
+            # Convert relative to absolute coordinates
+            x1 = int(zone['x1'] * frame_width)
+            y1 = int(zone['y1'] * frame_height)
+            x2 = int(zone['x2'] * frame_width)
+            y2 = int(zone['y2'] * frame_height)
+            
+            # Draw zone rectangle
+            color = (0, 255, 255) if self.intrusion_active else (128, 128, 128)  # Yellow if active, gray if inactive
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            
+            # Draw zone label
+            label = f"Zone: {zone['name']}"
+            cv2.putText(frame, label, (x1, y1 - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+    
     def detect_and_process(self, frame, current_time):
-        """Detect both objects and faces simultaneously."""
+        """Detect both objects and faces simultaneously with intrusion detection."""
         detected_objects = set()
         face_results = []
+        frame_height, frame_width = frame.shape[:2]
         
         # SIMULTANEOUS DETECTION: Run both models on the same frame
         object_results = self.object_model(frame, conf=0.5, verbose=False)
         face_results_raw = self.face_model.predict(frame, conf=0.5, verbose=False)
         
-        # Process object detections
+        # Process object detections and check for intrusions
+        persons_detected = []
+        
         for result in object_results:
             if result.boxes is not None:
                 for box in result.boxes:
@@ -177,6 +334,13 @@ class SimultaneousDetectionSystem:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     
                     detected_objects.add(class_name)
+                    
+                    # Special handling for person detection
+                    if class_name == 'person':
+                        persons_detected.append({
+                            'bbox': (x1, y1, x2, y2),
+                            'confidence': confidence
+                        })
                     
                     # Draw object detection (Blue boxes)
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
@@ -189,7 +353,9 @@ class SimultaneousDetectionSystem:
                     cv2.putText(frame, label, (x1 + 5, y1 - 5), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
-        # Process face detections
+        # Process face detections and check intrusions
+        recognized_faces = {}
+        
         for result in face_results_raw:
             if result.boxes is not None:
                 for box in result.boxes:
@@ -210,31 +376,56 @@ class SimultaneousDetectionSystem:
                         # Recognize face
                         name, similarity = self.recognize_face_fast(face_crop)
                         
-                        # Determine color and label
-                        if name != "Unknown" and name != "Error" and "No Face" not in name:
-                            color = (0, 255, 0)  # Green for recognized
-                            label = f"{name} ({similarity:.3f})"
+                        # Store recognized face location
+                        face_center_x = (x1 + x2) // 2
+                        face_center_y = (y1 + y2) // 2
+                        recognized_faces[(face_center_x, face_center_y)] = name
+                        
+                        # Check for intrusion
+                        is_intrusion, zone_name = self.check_intrusion((x1, y1, x2, y2), name, frame_width, frame_height)
+                        
+                        # Determine color and label based on intrusion status
+                        if is_intrusion:
+                            color = (0, 0, 255)  # Red for intruder
+                            label = f"🚨 INTRUDER: {name}"
+                            
+                            # Alert for intrusion
+                            if current_time - self.last_intrusion_alert > self.intrusion_cooldown:
+                                alert_msg = f"Security Alert! Unauthorized person {name} detected in {zone_name}"
+                                self.speak_async(alert_msg)
+                                self.log_intrusion(zone_name, name, similarity, frame)
+                                self.last_intrusion_alert = current_time
+                                
+                        elif name != "Unknown" and name != "Error" and "No Face" not in name:
+                            if name in self.authorized_faces:
+                                color = (0, 255, 0)  # Green for authorized
+                                label = f"✓ AUTHORIZED: {name} ({similarity:.3f})"
+                            else:
+                                color = (0, 165, 255)  # Orange for recognized but not authorized
+                                label = f"RECOGNIZED: {name} ({similarity:.3f})"
                             
                             # Announce face
                             if (name not in self.last_announcement or 
                                 current_time - self.last_announcement[name] > 4):
-                                self.speak_async(f"Hello {name}")
+                                greeting = f"Hello {name}" if name in self.authorized_faces else f"Unauthorized person {name} detected"
+                                self.speak_async(greeting)
                                 self.last_announcement[name] = current_time
                         else:
                             color = (0, 0, 255)  # Red for unknown
-                            label = "Unknown"
+                            label = "Unknown Person"
                         
-                        # Draw face detection (Green/Red boxes)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+                        # Draw face detection
+                        thickness = 4 if is_intrusion else 3
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
                         
                         # Face label with bigger text
                         font_scale = 0.8
-                        thickness = 2
-                        label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
+                        text_thickness = 2
+                        label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_thickness)[0]
                         cv2.rectangle(frame, (x1, y1 - label_size[1] - 15), 
                                      (x1 + label_size[0] + 15, y1), color, -1)
                         cv2.putText(frame, label, (x1 + 7, y1 - 7), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
+                                   cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), text_thickness)
                         
                         # Show detection confidence
                         cv2.putText(frame, f"Det: {confidence:.2f}", (x1, y2 + 30), 
@@ -260,7 +451,7 @@ class SimultaneousDetectionSystem:
         return frame
     
     def run(self):
-        """Main loop running both detections simultaneously."""
+        """Main loop running both detections simultaneously with intrusion detection."""
         cap = cv2.VideoCapture(0)
         
         # Set larger frame size
@@ -272,11 +463,18 @@ class SimultaneousDetectionSystem:
             print("Error: Could not open camera")
             return
         
-        print("🚀 Simultaneous Object Detection & Face Recognition Started")
+        print("🚀 Intrusion Detection System Started")
         print(f"Frame size: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
         print(f"Reference faces: {len(self.reference_embeddings)}")
-        print("\nBoth YOLOv11n (objects) and YOLOv8n-face run on EVERY frame!")
-        print("Blue boxes = Objects | Green boxes = Recognized faces | Red boxes = Unknown faces")
+        print(f"Authorized faces: {', '.join(self.authorized_faces)}")
+        print(f"Intrusion zones: {len(self.intrusion_zones)}")
+        print("\nControls:")
+        print("  q - Quit")
+        print("  r - Reload reference faces")
+        print("  i - Toggle intrusion detection")
+        print("  f - Fullscreen")
+        print("  w - Windowed mode")
+        print("  s - Save current frame")
         
         # Performance tracking
         fps_start_time = time.time()
@@ -297,6 +495,9 @@ class SimultaneousDetectionSystem:
                 current_fps = 30 / (current_time - fps_start_time)
                 fps_start_time = current_time
             
+            # Draw intrusion zones first
+            self.draw_intrusion_zones(frame)
+            
             # Process every nth frame
             if self.frame_count % self.FRAME_SKIP == 0:
                 # SIMULTANEOUS DETECTION: Both models run on same frame
@@ -305,19 +506,20 @@ class SimultaneousDetectionSystem:
             # Show performance info
             status = "Speaking..." if self.speaking else "Ready"
             processing = "Processing Both" if self.frame_count % self.FRAME_SKIP == 0 else "Skipping"
+            intrusion_status = "ACTIVE" if self.intrusion_active else "INACTIVE"
             
             cv2.putText(frame, f"FPS: {current_fps:.1f} | {status}", (15, 40), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
-            cv2.putText(frame, f"{processing} | Refs: {len(self.reference_embeddings)}", (15, 80), 
+            cv2.putText(frame, f"Intrusion: {intrusion_status} | {processing}", (15, 80), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(frame, f"Device: {self.device}", (15, 120), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            cv2.putText(frame, f"YOLOv11n + YOLOv8n-face Simultaneous", (15, 160), 
+            cv2.putText(frame, f"Authorized: {len(self.authorized_faces)} | Refs: {len(self.reference_embeddings)}", (15, 120), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(frame, f"Zones: {len(self.intrusion_zones)} | Alerts: {len(self.intrusion_log)}", (15, 160), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             
             # Create resizable window
-            cv2.namedWindow('Simultaneous Detection', cv2.WINDOW_NORMAL)
-            cv2.imshow('Simultaneous Detection', frame)
+            cv2.namedWindow('Intrusion Detection System', cv2.WINDOW_NORMAL)
+            cv2.imshow('Intrusion Detection System', frame)
             
             # Handle key presses
             key = cv2.waitKey(1) & 0xFF
@@ -326,19 +528,28 @@ class SimultaneousDetectionSystem:
             elif key == ord('r'):
                 print("Reloading reference faces...")
                 self.load_reference_faces()
+            elif key == ord('i'):
+                self.intrusion_active = not self.intrusion_active
+                status = "ACTIVE" if self.intrusion_active else "INACTIVE"
+                print(f"Intrusion detection: {status}")
             elif key == ord('f'):
-                cv2.setWindowProperty('Simultaneous Detection', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                cv2.setWindowProperty('Intrusion Detection System', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
             elif key == ord('w'):
-                cv2.setWindowProperty('Simultaneous Detection', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+                cv2.setWindowProperty('Intrusion Detection System', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+            elif key == ord('s'):
+                filename = f"screenshot_{int(time.time())}.jpg"
+                cv2.imwrite(filename, frame)
+                print(f"Screenshot saved: {filename}")
         
         cap.release()
         cv2.destroyAllWindows()
-        print("✅ Simultaneous Detection System stopped")
+        print("✅ Intrusion Detection System stopped")
+        print(f"Total intrusion events logged: {len(self.intrusion_log)}")
 
 # Usage
 if __name__ == "__main__":
     try:
-        system = SimultaneousDetectionSystem()
+        system = IntrusionDetectionSystem()
         system.run()
     except Exception as e:
         print(f"Error: {e}")
