@@ -399,20 +399,20 @@ class IntrusionDetectionSystem:
                         elif name != "Unknown" and name != "Error" and "No Face" not in name:
                             if name in self.authorized_faces:
                                 color = (0, 255, 0)  # Green for authorized
-                                label = f"✓ AUTHORIZED: {name} ({similarity:.3f})"
+                                label = f"✓ {name} ({similarity:.3f})"
                             else:
                                 color = (0, 165, 255)  # Orange for recognized but not authorized
-                                label = f"RECOGNIZED: {name} ({similarity:.3f})"
+                                label = f" {name} ({similarity:.3f})"
                             
                             # Announce face
                             if (name not in self.last_announcement or 
                                 current_time - self.last_announcement[name] > 4):
-                                greeting = f"Hello {name}" if name in self.authorized_faces else f"Unauthorized person {name} detected"
+                                greeting = f"Hello {name}" 
                                 self.speak_async(greeting)
                                 self.last_announcement[name] = current_time
                         else:
                             color = (0, 0, 255)  # Red for unknown
-                            label = "Unknown Person"
+                            label = "Unknownson"
                         
                         # Draw face detection
                         thickness = 4 if is_intrusion else 3
@@ -442,7 +442,7 @@ class IntrusionDetectionSystem:
                 else:
                     announcement = f"I can see {', '.join(objects_list[:-1])}, and a {objects_list[-1]}"
                 
-                self.speak_async(announcement)
+                #self.speak_async(announcement)
                 print(f"Objects: {', '.join(objects_list)}")
                 
             self.prev_objects = detected_objects.copy()

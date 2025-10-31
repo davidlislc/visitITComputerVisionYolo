@@ -1,0 +1,18 @@
+{
+    "intrusion_zones": [
+        {
+            "name": "Main Door",
+            "x1": 0.85,
+            "y1": 0.3,
+            "x2": 1.0,
+            "y2": 0.7
+        }
+    ],
+    "authorized_faces": [
+        "admin",
+        "user1",
+        "employee"
+    ],
+    "alert_threshold": 0.5,
+    "save_intrusion_images": true
+}
